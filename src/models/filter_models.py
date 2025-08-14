@@ -39,6 +39,12 @@ class AvailableFilter(BaseModel):
     label: str = Field(..., description="Human-readable label")
     sourceType: str = Field(..., description="Filter source type (lens/dimensions)")
     sourceId: str = Field(..., description="Source ID for API calls")
+    joinColumnName: Optional[str] = Field(None, description="Join column name for dimension filters")
+
+
+class DimensionInfo(BaseModel):
+    """Dimension information for dimension filters."""
+    id: str = Field(..., description="Dimension source ID")
 
 
 class FilterCondition(BaseModel):
@@ -46,6 +52,17 @@ class FilterCondition(BaseModel):
     column_name: str = Field(..., description="Column name from filter label")
     value: str = Field(..., description="Filter value")
     operator: FilterOperator = Field(default=FilterOperator.EQUAL, description="Filter operator")
+    dimension: Optional[DimensionInfo] = Field(None, description="Dimension info for dimension filters")
+    joinColumnName: Optional[str] = Field(None, description="Join column name for dimension filters")
+    
+    def dict(self, **kwargs):
+        """Custom dict method to include dimension fields only when present."""
+        result = super().dict(**kwargs)
+        # Only include dimension and joinColumnName if dimension is present
+        if self.dimension is None:
+            result.pop('dimension', None)
+            result.pop('joinColumnName', None)
+        return result
 
 
 class FilterGroup(BaseModel):

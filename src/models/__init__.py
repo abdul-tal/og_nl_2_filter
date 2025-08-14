@@ -2,6 +2,7 @@
 
 from .filter_models import (
     AvailableFilter,
+    DimensionInfo,
     FilterCondition,
     FilterGroup,
     FilterRequest,
@@ -16,6 +17,7 @@ from .filter_models import (
 
 __all__ = [
     "AvailableFilter",
+    "DimensionInfo",
     "FilterCondition", 
     "FilterGroup",
     "FilterRequest",

@@ -8,11 +8,40 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from ..models import (
-    FilterGroup, FilterCondition, FilterOperator, FilterType, LogicalOperator
+    FilterGroup, FilterCondition, FilterOperator, FilterType, LogicalOperator, DimensionInfo
 )
 
 # Thread-local storage for filter state management (from reference implementation)
 thread_local = threading.local()
+
+
+def create_filter_condition(filter_name: str, filter_value: str, operator: str, filter_type: str, available_filters: List[Dict[str, Any]]) -> FilterCondition:
+    """Create a FilterCondition with appropriate structure based on sourceType."""
+    
+    # Find the filter metadata
+    filter_metadata = None
+    for af in available_filters:
+        if af.get('name', '') == filter_name:
+            filter_metadata = af
+            break
+    
+    base_condition = {
+        "column_name": filter_name,
+        "value": filter_value,
+        "operator": FilterOperator(operator)
+    }
+    
+    # Add dimension-specific fields if sourceType is dimensions
+    if filter_metadata and filter_metadata.get('sourceType') == 'dimensions':
+        print(f"DEBUG: Creating dimension filter for {filter_name}, sourceId: {filter_metadata.get('sourceId')}, joinColumnName: {filter_metadata.get('joinColumnName')}")
+        base_condition["dimension"] = DimensionInfo(id=filter_metadata.get('sourceId', ''))
+        base_condition["joinColumnName"] = filter_metadata.get('joinColumnName')
+    else:
+        print(f"DEBUG: Creating lens filter for {filter_name}")
+    
+    condition = FilterCondition(**base_condition)
+    print(f"DEBUG: Created condition: {condition.dict()}")
+    return condition
 
 
 class FilterOperationInput(BaseModel):
@@ -83,11 +112,8 @@ def add_filter(filter_name: str, filter_label: str, filter_value: str, filter_ty
         
         if has_same_filter_type and filter_group.source_type.value == filter_type:
             # Add the new condition to the existing filter group
-            new_conditions = list(filter_group.value) + [FilterCondition(
-                column_name=actual_filter_name,
-                value=filter_value,
-                operator=FilterOperator(operator)
-            )]
+            new_condition = create_filter_condition(actual_filter_name, filter_value, operator, filter_type, available_filters)
+            new_conditions = list(filter_group.value) + [new_condition]
             
             updated_filters.append(FilterGroup(
                 operator=filter_group.operator,
@@ -101,13 +127,10 @@ def add_filter(filter_name: str, filter_label: str, filter_value: str, filter_ty
     
     # If no existing group was found for this filter type, create a new one
     if not filter_added:
+        new_condition = create_filter_condition(actual_filter_name, filter_value, operator, filter_type, available_filters)
         new_filter = FilterGroup(
             operator=LogicalOperator.AND,
-            value=[FilterCondition(
-                column_name=actual_filter_name,
-                value=filter_value,
-                operator=FilterOperator(operator)
-            )],
+            value=[new_condition],
             source_type=FilterType(filter_type)
         )
         updated_filters.append(new_filter)
@@ -118,7 +141,7 @@ def add_filter(filter_name: str, filter_label: str, filter_value: str, filter_ty
     return {
         "response_type": "success",
         "message": message,
-        "filters": [filter_group.model_dump() for filter_group in updated_filters]
+        "filters": [filter_group.dict() for filter_group in updated_filters]
     }
 
 
@@ -156,11 +179,8 @@ def modify_filter(filter_name: str, filter_label: str, filter_value: str, filter
                 if (condition.column_name.lower().replace(' ', '_') == filter_name.lower() or
                     condition.column_name.lower() == filter_label.lower()):
                     # Update this condition
-                    new_conditions.append(FilterCondition(
-                        column_name=actual_filter_name,
-                        value=filter_value,
-                        operator=FilterOperator(operator)
-                    ))
+                    new_condition = create_filter_condition(actual_filter_name, filter_value, operator, filter_type, available_filters)
+                    new_conditions.append(new_condition)
                     filter_found = True
                 else:
                     # Keep other conditions unchanged
@@ -177,13 +197,10 @@ def modify_filter(filter_name: str, filter_label: str, filter_value: str, filter
     
     if not filter_found:
         # If filter not found, add as new filter
+        new_condition = create_filter_condition(actual_filter_name, filter_value, operator, filter_type, available_filters)
         new_filter = FilterGroup(
             operator=LogicalOperator.AND,
-            value=[FilterCondition(
-                column_name=actual_filter_name,
-                value=filter_value,
-                operator=FilterOperator(operator)
-            )],
+            value=[new_condition],
             source_type=FilterType(filter_type)
         )
         updated_filters.append(new_filter)
@@ -192,7 +209,7 @@ def modify_filter(filter_name: str, filter_label: str, filter_value: str, filter
     return {
         "response_type": "success",
         "message": message,
-        "filters": [filter_group.model_dump() for filter_group in updated_filters]
+        "filters": [filter_group.dict() for filter_group in updated_filters]
     }
 
 
@@ -226,11 +243,7 @@ def add_or_filter(filter_name: str, filter_label: str, filter_values: List[str],
         if contains_same_filter and filter_group.source_type.value == filter_type:
             # Replace this filter group with OR logic and all values
             new_conditions = [
-                FilterCondition(
-                    column_name=actual_filter_name,
-                    value=value,
-                    operator=FilterOperator(operator)
-                )
+                create_filter_condition(actual_filter_name, value, operator, filter_type, available_filters)
                 for value in filter_values
             ]
             
@@ -247,11 +260,7 @@ def add_or_filter(filter_name: str, filter_label: str, filter_values: List[str],
     # If no existing group was found, create a new OR group
     if not filter_found:
         new_conditions = [
-            FilterCondition(
-                column_name=actual_filter_name,
-                value=value,
-                operator=FilterOperator(operator)
-            )
+            create_filter_condition(actual_filter_name, value, operator, filter_type, available_filters)
             for value in filter_values
         ]
         
@@ -267,7 +276,7 @@ def add_or_filter(filter_name: str, filter_label: str, filter_values: List[str],
     return {
         "response_type": "success",
         "message": message,
-        "filters": [filter_group.model_dump() for filter_group in updated_filters]
+        "filters": [filter_group.dict() for filter_group in updated_filters]
     }
 
 
@@ -303,7 +312,7 @@ def remove_filter(filter_name: str, filter_label: str, filter_value: str, filter
     return {
         "response_type": "success",
         "message": message,
-        "filters": [filter_group.model_dump() for filter_group in updated_filters]
+        "filters": [filter_group.dict() for filter_group in updated_filters]
     }
 
 
@@ -345,7 +354,7 @@ def remove_multiple_filters(filter_types: List[str], message: str) -> Dict[str, 
     return {
         "response_type": "success",
         "message": message,
-        "filters": [filter_group.model_dump() for filter_group in updated_filters]
+        "filters": [filter_group.dict() for filter_group in updated_filters]
     }
 
 
@@ -373,7 +382,7 @@ def handle_casual_conversation(message: str) -> Dict[str, Any]:
     return {
         "response_type": "success",
         "message": message,
-        "filters": [filter_group.model_dump() if hasattr(filter_group, 'model_dump') else filter_group 
+        "filters": [filter_group.dict() if hasattr(filter_group, 'dict') else filter_group 
                    for filter_group in initial_filters]
     }
 
@@ -395,7 +404,7 @@ def request_clarification(filter_name: str, user_input: str, available_values: L
     return {
         "response_type": "success",
         "message": formatted_message,
-        "filters": [filter_group.model_dump() if hasattr(filter_group, 'model_dump') else filter_group 
+        "filters": [filter_group.dict() if hasattr(filter_group, 'dict') else filter_group 
                    for filter_group in initial_filters]
     }
 
