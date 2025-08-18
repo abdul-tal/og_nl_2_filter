@@ -121,16 +121,17 @@ def normalize_filter_group(filter_data: Dict[str, Any]) -> Dict[str, Any]:
 
 def sanitize_response_object(response_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Sanitize response object by removing unwanted properties.
+    Sanitize response object by removing unwanted properties and null values.
     
-    This function recursively traverses the response object and removes
-    properties that should not be exposed in the API response.
+    This function recursively traverses the response object and removes:
+    1. Properties that should not be exposed in the API response
+    2. Properties with null/None values
     
     Args:
         response_data: The response dictionary to sanitize
         
     Returns:
-        Sanitized response dictionary with unwanted properties removed
+        Sanitized response dictionary with unwanted properties and null values removed
     """
     # List of properties to remove from responses
     UNWANTED_PROPERTIES = {'source_type'}
@@ -138,17 +139,25 @@ def sanitize_response_object(response_data: Dict[str, Any]) -> Dict[str, Any]:
     def _sanitize_recursive(obj):
         """Recursively sanitize nested objects."""
         if isinstance(obj, dict):
-            # Create a new dict without unwanted properties
+            # Create a new dict without unwanted properties and null values
             sanitized = {}
             for key, value in obj.items():
                 if key not in UNWANTED_PROPERTIES:
-                    sanitized[key] = _sanitize_recursive(value)
+                    sanitized_value = _sanitize_recursive(value)
+                    # Only include the key if the value is not None/null
+                    if sanitized_value is not None:
+                        sanitized[key] = sanitized_value
             return sanitized
         elif isinstance(obj, list):
-            # Recursively sanitize list items
-            return [_sanitize_recursive(item) for item in obj]
+            # Recursively sanitize list items and filter out None values
+            sanitized_list = []
+            for item in obj:
+                sanitized_item = _sanitize_recursive(item)
+                if sanitized_item is not None:
+                    sanitized_list.append(sanitized_item)
+            return sanitized_list
         else:
-            # Return primitive values as-is
+            # Return primitive values as-is (including None for filtering at parent level)
             return obj
     
     return _sanitize_recursive(response_data)
