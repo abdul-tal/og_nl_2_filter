@@ -18,6 +18,9 @@ from ..models import (
 # Thread-local storage for filter state management (from reference implementation)
 thread_local = threading.local()
 
+# Cache for filter values to avoid redundant API calls
+filter_values_cache = {}
+
 
 # Local storage functions for account_summary management
 def store_account_summary(account_summary: dict) -> None:
@@ -117,6 +120,24 @@ def normalize_filter_group(filter_data: Dict[str, Any]) -> Dict[str, Any]:
         normalized["operator"] = "and"
     
     return normalized
+
+
+def validate_filter_value(filter_name: str, filter_value: str, source_id: str) -> tuple[bool, List[str]]:
+    """Validate that a filter value exists in the available values.
+    
+    Returns:
+        tuple: (is_valid, available_values_list)
+    """
+    try:
+        print(f'Validating filter value "{filter_value}" for {filter_name}...')
+        available_values = get_filter_values(filter_name, source_id)
+        is_valid = filter_value in available_values
+        print(f'Validation result for "{filter_value}": {is_valid} (found in {len(available_values)} available values)')
+        return is_valid, available_values
+    except Exception as e:
+        print(f'Exception during validation for {filter_name}: {str(e)}')
+        # If validation fails, assume the value is valid to avoid blocking operations
+        return True, []
 
 
 def sanitize_response_object(response_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -307,6 +328,17 @@ class ColumnGroupSelectionInput(BaseModel):
 def add_filter(filter_name: str, filter_label: str, filter_value: str, filter_type: str, source_id: str, message: str, operator: str = "equal") -> Dict[str, Any]:
     """Add a new filter condition. Same filter types are grouped together, different filter types get separate entries."""
     
+    # First, validate the filter value by calling get_filter_values
+    is_valid, available_values = validate_filter_value(filter_name, filter_value, source_id)
+    if not is_valid and available_values:
+        return {
+            "response_type": "clarification_needed",
+            "message": f"The value '{filter_value}' is not available for {filter_label}. Available values are: {', '.join(available_values[:10])}{'...' if len(available_values) > 10 else ''}",
+            "available_values": available_values,
+            "filter_name": filter_name,
+            "filter_label": filter_label
+        }
+    
     # Get stored account_summary from thread-local
     account_summary = get_stored_account_summary()
     if not account_summary:
@@ -418,6 +450,17 @@ def add_filter(filter_name: str, filter_label: str, filter_value: str, filter_ty
 @tool("modify_filter", args_schema=FilterOperationInput)
 def modify_filter(filter_name: str, filter_label: str, filter_value: str, filter_type: str, source_id: str, message: str, operator: str = "equal") -> Dict[str, Any]:
     """Modify an existing filter while preserving other filters."""
+    
+    # First, validate the filter value by calling get_filter_values
+    is_valid, available_values = validate_filter_value(filter_name, filter_value, source_id)
+    if not is_valid and available_values:
+        return {
+            "response_type": "clarification_needed",
+            "message": f"The value '{filter_value}' is not available for {filter_label}. Available values are: {', '.join(available_values[:10])}{'...' if len(available_values) > 10 else ''}",
+            "available_values": available_values,
+            "filter_name": filter_name,
+            "filter_label": filter_label
+        }
     
     # Get stored account_summary from thread-local
     account_summary = get_stored_account_summary()
@@ -537,6 +580,19 @@ def modify_filter(filter_name: str, filter_label: str, filter_value: str, filter
 @tool("add_or_filter", args_schema=ORFilterOperationInput)
 def add_or_filter(filter_name: str, filter_label: str, filter_values: List[str], filter_type: str, source_id: str, message: str, operator: str = "equal") -> Dict[str, Any]:
     """Add or modify a filter with OR logic for multiple values."""
+    
+    # First, validate all filter values by calling get_filter_values
+    available_values = get_filter_values(filter_name, source_id)
+    invalid_values = [val for val in filter_values if val not in available_values] if available_values else []
+    
+    if invalid_values and available_values:
+        return {
+            "response_type": "clarification_needed",
+            "message": f"The following values are not available for {filter_label}: {', '.join(invalid_values)}. Available values are: {', '.join(available_values[:10])}{'...' if len(available_values) > 10 else ''}",
+            "available_values": available_values,
+            "filter_name": filter_name,
+            "filter_label": filter_label
+        }
     
     # Get stored account_summary from thread-local
     account_summary = get_stored_account_summary()
@@ -1092,6 +1148,12 @@ def _extract_group_name(column_group: Dict[str, Any]) -> Optional[str]:
 @tool("get_filter_values")
 def get_filter_values(filter_name: str, source_id: str) -> List[str]:
     """Fetch available values for a filter from the API using the sourceId."""
+    # Check cache first
+    cache_key = f"{filter_name}_{source_id}"
+    if cache_key in filter_values_cache:
+        print(f'Using cached values for {filter_name}: {filter_values_cache[cache_key]}')
+        return filter_values_cache[cache_key]
+    
     try:
         # Get delphi session from thread-local storage
         delphi_session = getattr(thread_local, 'delphi_session', '')
@@ -1103,6 +1165,7 @@ def get_filter_values(filter_name: str, source_id: str) -> List[str]:
             "Content-Type": "application/json"
         }
         
+        print(f'Fetching filter values for {filter_name} from API...')
         with httpx.Client(timeout=30.0) as client:
             response = client.get(url, headers=headers)
             
@@ -1110,16 +1173,22 @@ def get_filter_values(filter_name: str, source_id: str) -> List[str]:
                 data = response.json()
                 values = data.get("data", [])
                 result = [str(value) for value in values if value is not None][:50]  # Limit to 50 values
-                print('result:get_filter_values', result)
+                print(f'Successfully fetched {len(result)} values for {filter_name}: {result[:5]}...')
+                
+                # Cache the result
+                filter_values_cache[cache_key] = result
+                
                 # If no values returned but API succeeded, return demo values for testing
                 if not result:
                     return []
                 
                 return result
             else:
+                print(f'API request failed with status {response.status_code} for {filter_name}')
                 # Fallback demo values if API fails
                 return []
-    except Exception:
+    except Exception as e:
+        print(f'Exception while fetching filter values for {filter_name}: {str(e)}')
         # Fallback demo values on exception
         return []
 
