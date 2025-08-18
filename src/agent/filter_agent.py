@@ -9,8 +9,8 @@ from langchain.prompts.chat import ChatPromptTemplate
 from langchain.schema import SystemMessage
 from langchain.prompts import MessagesPlaceholder
 
-from ..models import FilterRequest, FilterAPIResponse, FilterResponse, ErrorResponse
-from ..tools import FILTER_TOOLS, initialize_filter_state
+from ..models import FilterRequest, FilterAPIResponse, FilterResponse, ErrorResponse, AccountSummary, ColumnGroupClarificationResponse
+from ..tools import FILTER_TOOLS, initialize_filter_state, thread_local, get_final_account_summary, set_user_query
 from ..utils import conversation_store
 from .prompts import FILTER_AGENT_SYSTEM_PROMPT
 
@@ -63,9 +63,12 @@ class FilterAgent:
             if request.conversation_id:
                 conversation_store.add_message(request.conversation_id, "user", request.query)
             
-            # Initialize filter state with existing filters, delphi session, and available filters
+            # Initialize filter state with existing account_summary, delphi session, and available filters
             available_filters_dict = [filter_obj.model_dump() for filter_obj in request.available_filters]
-            initialize_filter_state(request.initial_filters or [], request.delphi_session, available_filters_dict)
+            initialize_filter_state(request.account_summary, request.delphi_session, available_filters_dict)
+            
+            # Store user query for column group identification
+            set_user_query(request.query)
             
             # Build context for the agent
             input_message = self._build_input_message(request)
@@ -99,9 +102,19 @@ class FilterAgent:
             for f in request.available_filters
         ])
         
-        current_filters_desc = "No existing filters"
-        if request.initial_filters:
-            current_filters_desc = json.dumps(request.initial_filters, indent=2)
+        current_filters_desc = "No existing account summary"
+        if request.account_summary:
+            # Provide a more focused description of the columnGroups structure
+            column_groups_desc = []
+            for i, cg in enumerate(request.account_summary.columnGroups):
+                filters_count = len(cg.filters)
+                column_groups_desc.append(f"  - ColumnGroup {i} (id: {cg.id}): {filters_count} filters")
+            
+            if column_groups_desc:
+                current_filters_desc = f"Account Summary with {len(request.account_summary.columnGroups)} columnGroups:\n" + "\n".join(column_groups_desc)
+                current_filters_desc += f"\n\nFull structure:\n{json.dumps(request.account_summary.dict(), indent=2)}"
+            else:
+                current_filters_desc = json.dumps(request.account_summary.dict(), indent=2)
         
         # Get conversation history from store
         conversation_context = ""
@@ -118,7 +131,7 @@ class FilterAgent:
 Available Filters:
 {available_filters_desc}
 
-Current Filters State:
+Current Account Summary State:
 {current_filters_desc}{conversation_context}
 
 Please analyze the user's request and use the appropriate tools to handle it.
@@ -128,6 +141,7 @@ Remember to:
 3. Use the correct operation tool (add_filter, modify_filter, remove_filter)
 4. Each different filter type should be a separate entry in the final result
 5. Request clarification if values don't exist
+6. Filters are organized within columnGroups - modify the appropriate columnGroup based on context
 """
     
     def _process_agent_result(self, result: Dict[str, Any], conversation_id: str) -> FilterAPIResponse:
@@ -153,27 +167,99 @@ Remember to:
         response_type = tool_result.get("response_type")
         message = tool_result.get("message", "")
         
-        if response_type == "success":
-            filters_data = tool_result.get("filters", [])
+        if response_type == "clarification_needed":
+            # Handle column group clarification
+            available_groups = tool_result.get("available_groups", [])
+            return ColumnGroupClarificationResponse(
+                message=message,
+                available_groups=available_groups,
+                conversation_id=conversation_id
+            )
+        
+        elif response_type == "success":
+            # Check if the tool returned account_summary directly (new format)
+            if "account_summary" in tool_result:
+                account_summary_data = tool_result["account_summary"]
+                if account_summary_data:
+                    account_summary = AccountSummary(**account_summary_data)
+                else:
+                    # Fallback: Use the updated account_summary from local storage
+                    final_account_summary_dict = get_final_account_summary()
+                    if final_account_summary_dict:
+                        account_summary = AccountSummary(**final_account_summary_dict)
+                    else:
+                        # Create minimal account_summary structure
+                        from ..models import ColumnGroup
+                        demo_column_group = ColumnGroup(
+                            id="default_column_group",
+                            lens={"id": "default_lens"},
+                            measureColumn={"id": "default_measure"},
+                            grouping=[],
+                            filters=[],
+                            dateFilter=[],
+                            relativeFilter="",
+                            type="default",
+                            columnValueMapping={},
+                            rollingNumRangeOption={}
+                        )
+                        
+                        account_summary = AccountSummary(
+                            columnGroups=[demo_column_group],
+                            columnOrder={},
+                            expandedGroupKeys={},
+                            expandedRows={},
+                            filters=[],
+                            formatting={},
+                            hiddenColumns={},
+                            rowGroups=[],
+                            charts=[],
+                            rounding={}
+                        )
+                
+                return FilterResponse(
+                    message=message,
+                    account_summary=account_summary,
+                    conversation_id=conversation_id
+                )
             
-            # Convert to FilterGroup objects  
-            from ..models import FilterGroup, FilterCondition
-            filter_groups = []
+            # Legacy fallback: Use the updated account_summary from local storage
+            final_account_summary_dict = get_final_account_summary()
             
-            for filter_data in filters_data:
-                conditions = [
-                    FilterCondition(**condition_data)
-                    for condition_data in filter_data.get("value", [])
-                ]
-                filter_groups.append(FilterGroup(
-                    operator=filter_data.get("operator", "and"),
-                    value=conditions,
-                    source_type=filter_data.get("source_type", "lens")
-                ))
+            if final_account_summary_dict:
+                # Use the stored account_summary which already has all updates applied
+                account_summary = AccountSummary(**final_account_summary_dict)
+            else:
+                # Fallback: Create a minimal account_summary structure 
+                from ..models import ColumnGroup
+                demo_column_group = ColumnGroup(
+                    id="default_column_group",
+                    lens={"id": "default_lens"},
+                    measureColumn={"id": "default_measure"},
+                    grouping=[],
+                    filters=[],
+                    dateFilter=[],
+                    relativeFilter="",
+                    type="default",
+                    columnValueMapping={},
+                    rollingNumRangeOption={}
+                )
+                
+                account_summary = AccountSummary(
+                    columnGroups=[demo_column_group],
+                    columnOrder={},
+                    expandedGroupKeys={},
+                    expandedRows={},
+                    filters=[],
+                    formatting={},
+                    hiddenColumns={},
+                    rowGroups=[],
+                    charts=[],
+                    rounding={}
+                )
             
             return FilterResponse(
                 message=message,
-                filters=filter_groups,
+                account_summary=account_summary,
                 conversation_id=conversation_id
             )
         

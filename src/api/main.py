@@ -9,6 +9,7 @@ from ..models import FilterRequest, FilterAPIResponse
 from ..agent import FilterAgent
 from ..config import get_settings
 from ..utils import conversation_store
+from ..tools.filter_tools import sanitize_response_object
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -89,6 +90,13 @@ async def process_filter_request(request: FilterRequest) -> FilterAPIResponse:
         # Process the request using the filter agent
         response = filter_agent.process_request(request)
         
+        # Sanitize the response to remove unwanted properties
+        if hasattr(response, 'dict'):
+            response_dict = response.dict()
+            sanitized_dict = sanitize_response_object(response_dict)
+            # Create a custom JSONResponse to ensure sanitization is applied
+            return JSONResponse(content=sanitized_dict)
+        
         logger.info(f"Processed request for conversation {request.conversation_id}")
         return response
         
@@ -104,64 +112,85 @@ async def process_filter_request(request: FilterRequest) -> FilterAPIResponse:
 
 def _create_demo_response(request: FilterRequest) -> FilterAPIResponse:
     """Create a demo response when OpenAI is not available."""
-    from ..models import FilterResponse, FilterGroup, FilterCondition
+    from ..models import FilterResponse, AccountSummary, ColumnGroup
     
     # Create a simple demo filter based on the query
     query_lower = request.query.lower()
     
+    # Create demo filter data
     if "account" in query_lower and "payable" in query_lower:
-        demo_filter = FilterGroup(
-            operator="and",
-            value=[FilterCondition(
-                column_name="Account Type",
-                value="Accounts Payable", 
-                operator="equal"
-            )],
-            source_type="lens"
-        )
+        demo_filter_data = {
+            "operator": "and",
+            "value": [{
+                "column_name": "Account Type",
+                "value": "Accounts Payable", 
+                "operator": "equal"
+            }]
+        }
     elif "fiscal" in query_lower and "10" in query_lower:
-        demo_filter = FilterGroup(
-            operator="and",
-            value=[FilterCondition(
-                column_name="Fiscal Period",
-                value="10",
-                operator="equal"
-            )],
-            source_type="lens"
-        )
+        demo_filter_data = {
+            "operator": "and",
+            "value": [{
+                "column_name": "Fiscal Period",
+                "value": "10",
+                "operator": "equal"
+            }]
+        }
     else:
-        demo_filter = FilterGroup(
-            operator="and",
-            value=[FilterCondition(
-                column_name="Demo Filter",
-                value="Demo Value",
-                operator="equal"
-            )],
-            source_type="lens"
+        demo_filter_data = {
+            "operator": "and",
+            "value": [{
+                "column_name": "Demo Filter",
+                "value": "Demo Value",
+                "operator": "equal"
+            }]
+        }
+    
+    # Use existing account_summary if provided, otherwise create a minimal demo structure
+    if request.account_summary:
+        updated_account_summary = request.account_summary.dict()
+        # Add the new filter to the first column group's filters
+        if updated_account_summary["columnGroups"]:
+            updated_account_summary["columnGroups"][0]["filters"].append(demo_filter_data)
+        account_summary = AccountSummary(**updated_account_summary)
+    else:
+        # Create a minimal demo account_summary structure
+        demo_column_group = ColumnGroup(
+            id="demo_column_group",
+            lens={"id": "demo_lens"},
+            measureColumn={"id": "demo_measure"},
+            grouping=[],
+            filters=[demo_filter_data],
+            dateFilter=[],
+            relativeFilter="",
+            type="demo",
+            columnValueMapping={},
+            rollingNumRangeOption={}
+        )
+        
+        account_summary = AccountSummary(
+            columnGroups=[demo_column_group],
+            columnOrder={},
+            expandedGroupKeys={},
+            expandedRows={},
+            filters=[],
+            formatting={},
+            hiddenColumns={},
+            rowGroups=[],
+            charts=[],
+            rounding={}
         )
     
-    # Include existing filters if any
-    existing_filters = []
-    if request.initial_filters:
-        for filter_data in request.initial_filters:
-            conditions = [
-                FilterCondition(**condition_data)
-                for condition_data in filter_data.get("value", [])
-            ]
-            existing_filters.append(FilterGroup(
-                operator=filter_data.get("operator", "and"),
-                value=conditions,
-                source_type=filter_data.get("source_type", "lens")
-            ))
-    
-    # Combine existing and new filters
-    all_filters = existing_filters + [demo_filter]
-    
-    return FilterResponse(
+    response = FilterResponse(
         message=f"Demo: Created filter based on '{request.query}'",
-        filters=all_filters,
+        account_summary=account_summary,
         conversation_id=request.conversation_id
     )
+    
+    # Sanitize the demo response as well
+    response_dict = response.dict()
+    sanitized_dict = sanitize_response_object(response_dict)
+    return JSONResponse(content=sanitized_dict)
 
 
 if __name__ == "__main__":

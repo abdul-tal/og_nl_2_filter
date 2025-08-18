@@ -13,6 +13,12 @@ from .filter_models import (
     FilterType,
     LogicalOperator,
     ResponseType,
+    AccountSummary,
+    ColumnGroup,
+    ConversationMessage,
+    ColumnGroupClarificationNeeded,
+    ColumnGroupClarificationResponse,
+    ColumnGroupSelectionRequest,
 )
 
 __all__ = [
@@ -28,4 +34,10 @@ __all__ = [
     "FilterType",
     "LogicalOperator",
     "ResponseType",
+    "AccountSummary",
+    "ColumnGroup",
+    "ConversationMessage",
+    "ColumnGroupClarificationNeeded",
+    "ColumnGroupClarificationResponse",
+    "ColumnGroupSelectionRequest",
 ]

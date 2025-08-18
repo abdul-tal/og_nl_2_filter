@@ -145,3 +145,6 @@ src2/
 run2.py
 comprehensive_test.py
 test*
+new_tasks/
+venv/
+.venv/

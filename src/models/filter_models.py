@@ -49,7 +49,7 @@ class DimensionInfo(BaseModel):
 
 class FilterCondition(BaseModel):
     """Individual filter condition."""
-    column_name: str = Field(..., description="Column name from filter label")
+    columnName: str = Field(..., description="Column name from filter label")
     value: str = Field(..., description="Filter value")
     operator: FilterOperator = Field(default=FilterOperator.EQUAL, description="Filter operator")
     dimension: Optional[DimensionInfo] = Field(None, description="Dimension info for dimension filters")
@@ -70,6 +70,44 @@ class FilterGroup(BaseModel):
     operator: LogicalOperator = Field(default=LogicalOperator.AND, description="Logical operator")
     value: List[FilterCondition] = Field(..., description="Filter conditions")
     source_type: FilterType = Field(..., description="Source type for this group")
+    
+    def dict(self, **kwargs):
+        """Custom dict method to exclude source_type from JSON output."""
+        result = super().dict(**kwargs)
+        result.pop('source_type', None)
+        return result
+    
+    def json(self, **kwargs):
+        """Custom json method to exclude source_type from JSON output."""
+        return super().json(exclude={'source_type'}, **kwargs)
+
+
+class ColumnGroup(BaseModel):
+    """Column group configuration for account summary."""
+    id: str = Field(..., description="Column group identifier")
+    lens: Dict[str, Any] = Field(..., description="Lens configuration")
+    measureColumn: Dict[str, Any] = Field(..., description="Measure column configuration")
+    grouping: List[Dict[str, Any]] = Field(..., description="Grouping configuration")
+    filters: List[Dict[str, Any]] = Field(..., description="Filters for this column group")
+    dateFilter: List[Dict[str, Any]] = Field(..., description="Date filter configuration")
+    relativeFilter: str = Field(..., description="Relative filter configuration")
+    type: str = Field(..., description="Column group type")
+    columnValueMapping: Dict[str, Any] = Field(..., description="Column value mapping")
+    rollingNumRangeOption: Dict[str, Any] = Field(..., description="Rolling number range options")
+
+
+class AccountSummary(BaseModel):
+    """Account summary configuration."""
+    columnGroups: List[ColumnGroup] = Field(..., description="List of column groups")
+    columnOrder: Dict[str, Any] = Field(..., description="Column order configuration")
+    expandedGroupKeys: Dict[str, Any] = Field(..., description="Expanded group keys")
+    expandedRows: Dict[str, Any] = Field(..., description="Expanded rows configuration")
+    filters: List[Dict[str, Any]] = Field(..., description="Global filters")
+    formatting: Dict[str, Any] = Field(..., description="Formatting configuration")
+    hiddenColumns: Dict[str, Any] = Field(..., description="Hidden columns configuration")
+    rowGroups: List[Dict[str, Any]] = Field(..., description="Row groups configuration")
+    charts: List[Dict[str, Any]] = Field(..., description="Charts configuration")
+    rounding: Dict[str, Any] = Field(..., description="Rounding configuration")
 
 
 class ConversationMessage(BaseModel):
@@ -84,15 +122,15 @@ class FilterRequest(BaseModel):
     query: str = Field(..., description="Natural language filter request")
     available_filters: List[AvailableFilter] = Field(..., description="Available filter metadata")
     delphi_session: str = Field(..., description="Authentication session")
-    initial_filters: Optional[List[Dict[str, Any]]] = Field(None, description="Current filter state")
+    account_summary: Optional[AccountSummary] = Field(None, description="Current account summary state")
     conversation_id: Optional[str] = Field(None, description="Conversation ID")
 
 
 class FilterResponse(BaseModel):
-    """Success response with filters."""
+    """Success response with account summary."""
     type: str = Field(default="success", description="Response type")
     message: str = Field(..., description="Human-readable message")
-    filters: List[FilterGroup] = Field(..., description="Filter groups")
+    account_summary: AccountSummary = Field(..., description="Updated account summary")
     conversation_id: Optional[str] = Field(None, description="Conversation ID")
 
 
@@ -104,5 +142,28 @@ class ErrorResponse(BaseModel):
     conversation_id: Optional[str] = Field(None, description="Conversation ID")
 
 
+class ColumnGroupClarificationNeeded(Exception):
+    """Exception raised when column group clarification is needed."""
+    
+    def __init__(self, available_groups: List[Dict[str, str]], message: str = "Multiple column groups found. Please specify which one."):
+        self.available_groups = available_groups
+        self.message = message
+        super().__init__(self.message)
+
+
+class ColumnGroupClarificationResponse(BaseModel):
+    """Response requesting column group clarification."""
+    type: str = Field(default="clarification_needed", description="Response type")
+    message: str = Field(..., description="Clarification message")
+    available_groups: List[Dict[str, str]] = Field(..., description="Available column groups for selection")
+    conversation_id: Optional[str] = Field(None, description="Conversation ID")
+
+
+class ColumnGroupSelectionRequest(BaseModel):
+    """Request model for column group selection."""
+    column_group_id: str = Field(..., description="Selected column group ID")
+    column_group_name: str = Field(..., description="Selected column group name")
+
+
 # Union type for API responses
-FilterAPIResponse = Union[FilterResponse, ErrorResponse]
+FilterAPIResponse = Union[FilterResponse, ErrorResponse, ColumnGroupClarificationResponse]
