@@ -1158,7 +1158,7 @@ def get_filter_values(filter_name: str, source_id: str) -> List[str]:
         # Get delphi session from thread-local storage
         delphi_session = getattr(thread_local, 'delphi_session', '')
         
-        url = f"http://controlpanel.ogov.me/api/reporting_service/next/dataset/{source_id}/column/{filter_name}/distinct"
+        url = f"https://controlpanel.ogintegration.us/api/reporting_service/next/dataset/{source_id}/column/{filter_name}/distinct"
         
         headers = {
             "Cookie": f"_delphi_session={delphi_session}",
