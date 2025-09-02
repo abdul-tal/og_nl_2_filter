@@ -1,6 +1,7 @@
 """FastAPI application for the filter agent."""
 
 import logging
+import time
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -9,7 +10,7 @@ from ..models import FilterRequest, FilterAPIResponse
 from ..agent import FilterAgent
 from ..config import get_settings
 from ..utils import conversation_store
-from ..tools.filter_tools import sanitize_response_object
+from ..tools.filter_tools import sanitize_response_object, get_cache_stats
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -74,6 +75,12 @@ async def cleanup_old_conversations():
     return {"message": f"Cleaned up {cleaned_count} old conversations"}
 
 
+@app.get("/api/cache/stats")
+async def get_filter_cache_stats():
+    """Get filter cache statistics and performance metrics."""
+    return get_cache_stats()
+
+
 @app.post("/api/filters/natural-language", response_model=FilterAPIResponse)
 async def process_filter_request(request: FilterRequest) -> FilterAPIResponse:
     """
@@ -82,25 +89,48 @@ async def process_filter_request(request: FilterRequest) -> FilterAPIResponse:
     This endpoint takes a natural language query and converts it to structured filters
     while preserving existing filters and supporting incremental operations.
     """
+    # Start total timing
+    total_start_time = time.time()
+    print(f"\n🚀 [TIMING] Starting natural language filter request processing...")
+    print(f"📝 [TIMING] Query: '{request.query}'")
+    
     try:
         if filter_agent is None:
             # Demo mode - return mock response
-            return _create_demo_response(request)
+            demo_start = time.time()
+            response = _create_demo_response(request)
+            demo_time = time.time() - demo_start
+            total_time = time.time() - total_start_time
+            print(f"🎭 [TIMING] Demo mode processing: {demo_time:.3f}s")
+            print(f"⏱️  [TIMING] Total request time: {total_time:.3f}s")
+            return response
         
         # Process the request using the filter agent
+        agent_start_time = time.time()
         response = filter_agent.process_request(request)
+        agent_time = time.time() - agent_start_time
+        print(f"🤖 [TIMING] Filter agent processing: {agent_time:.3f}s")
         
         # Sanitize the response to remove unwanted properties
+        sanitize_start = time.time()
         if hasattr(response, 'dict'):
             response_dict = response.dict()
             sanitized_dict = sanitize_response_object(response_dict)
+            sanitize_time = time.time() - sanitize_start
+            total_time = time.time() - total_start_time
+            print(f"🧹 [TIMING] Response sanitization: {sanitize_time:.3f}s")
+            print(f"⏱️  [TIMING] Total request time: {total_time:.3f}s")
             # Create a custom JSONResponse to ensure sanitization is applied
             return JSONResponse(content=sanitized_dict)
         
+        total_time = time.time() - total_start_time
+        print(f"⏱️  [TIMING] Total request time: {total_time:.3f}s")
         logger.info(f"Processed request for conversation {request.conversation_id}")
         return response
         
     except Exception as e:
+        total_time = time.time() - total_start_time
+        print(f"❌ [TIMING] Error occurred after {total_time:.3f}s")
         logger.error(f"Error processing request: {str(e)}")
         from ..models import ErrorResponse
         return ErrorResponse(

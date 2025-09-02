@@ -4,11 +4,34 @@ import json
 import httpx
 import threading
 import logging
+import time
+import functools
 from typing import List, Dict, Any, Optional
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+# Timing decorator for function-level performance analysis
+def timing_decorator(func_name: str = None):
+    """Decorator to measure function execution time."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            name = func_name or func.__name__
+            start_time = time.time()
+            print(f"          ⚡ [TIMING] Function '{name}' starting...")
+            try:
+                result = func(*args, **kwargs)
+                execution_time = time.time() - start_time
+                print(f"          ⚡ [TIMING] Function '{name}' completed: {execution_time:.3f}s")
+                return result
+            except Exception as e:
+                execution_time = time.time() - start_time
+                print(f"          ❌ [TIMING] Function '{name}' failed after: {execution_time:.3f}s")
+                raise
+        return wrapper
+    return decorator
 
 from ..models import (
     FilterGroup, FilterCondition, FilterOperator, FilterType, LogicalOperator, DimensionInfo, AccountSummary,
@@ -18,11 +41,95 @@ from ..models import (
 # Thread-local storage for filter state management (from reference implementation)
 thread_local = threading.local()
 
-# Cache for filter values to avoid redundant API calls
+# Enhanced cache for filter values with expiration and metrics
+import datetime
+from typing import NamedTuple
+
+class CacheEntry(NamedTuple):
+    data: List[str]
+    timestamp: datetime.datetime
+    ttl_seconds: int = 300  # 5 minutes default TTL
+
 filter_values_cache = {}
+cache_stats = {
+    'hits': 0,
+    'misses': 0,
+    'expired': 0,
+    'total_requests': 0
+}
+
+@timing_decorator("is_cache_valid")
+def is_cache_valid(cache_entry: CacheEntry) -> bool:
+    """Check if cache entry is still valid based on TTL."""
+    age_seconds = (datetime.datetime.now() - cache_entry.timestamp).total_seconds()
+    return age_seconds < cache_entry.ttl_seconds
+
+@timing_decorator("get_from_cache")
+def get_from_cache(cache_key: str) -> tuple[bool, List[str]]:
+    """Get data from cache with validation and metrics."""
+    cache_stats['total_requests'] += 1
+    
+    if cache_key not in filter_values_cache:
+        cache_stats['misses'] += 1
+        print(f'      📊 [CACHE] Miss for key: {cache_key}')
+        return False, []
+    
+    cache_entry = filter_values_cache[cache_key]
+    if not is_cache_valid(cache_entry):
+        cache_stats['expired'] += 1
+        del filter_values_cache[cache_key]  # Remove expired entry
+        print(f'      ⏰ [CACHE] Expired entry removed for key: {cache_key}')
+        return False, []
+    
+    cache_stats['hits'] += 1
+    hit_rate = (cache_stats['hits'] / cache_stats['total_requests']) * 100
+    print(f'      ✅ [CACHE] Hit for key: {cache_key} (hit rate: {hit_rate:.1f}%)')
+    return True, cache_entry.data
+
+@timing_decorator("set_cache")
+def set_cache(cache_key: str, data: List[str], ttl_seconds: int = 300) -> None:
+    """Store data in cache with timestamp and TTL."""
+    cache_entry = CacheEntry(
+        data=data,
+        timestamp=datetime.datetime.now(),
+        ttl_seconds=ttl_seconds
+    )
+    filter_values_cache[cache_key] = cache_entry
+    print(f'      💾 [CACHE] Stored {len(data)} values for key: {cache_key} (TTL: {ttl_seconds}s)')
+
+@timing_decorator("cleanup_expired_cache")
+def cleanup_expired_cache() -> int:
+    """Clean up expired cache entries and return count of removed entries."""
+    removed_count = 0
+    keys_to_remove = []
+    
+    for key, entry in filter_values_cache.items():
+        if not is_cache_valid(entry):
+            keys_to_remove.append(key)
+    
+    for key in keys_to_remove:
+        del filter_values_cache[key]
+        removed_count += 1
+    
+    if removed_count > 0:
+        print(f'      🧹 [CACHE] Cleaned up {removed_count} expired entries')
+    
+    return removed_count
+
+def get_cache_stats() -> dict:
+    """Get current cache statistics."""
+    total_entries = len(filter_values_cache)
+    hit_rate = (cache_stats['hits'] / cache_stats['total_requests'] * 100) if cache_stats['total_requests'] > 0 else 0
+    
+    return {
+        **cache_stats,
+        'total_entries': total_entries,
+        'hit_rate_percent': round(hit_rate, 2)
+    }
 
 
 # Local storage functions for account_summary management
+@timing_decorator("store_account_summary")
 def store_account_summary(account_summary: dict) -> None:
     """Store account_summary in thread-local storage."""
     thread_local.account_summary_dict = account_summary
@@ -34,6 +141,7 @@ def store_account_summary(account_summary: dict) -> None:
         thread_local.current_column_group_id = None
 
 
+@timing_decorator("get_stored_account_summary")
 def get_stored_account_summary() -> dict:
     """Retrieve account_summary from thread-local storage."""
     return getattr(thread_local, 'account_summary_dict', {})
@@ -122,6 +230,7 @@ def normalize_filter_group(filter_data: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+@timing_decorator("validate_filter_value")
 def validate_filter_value(filter_name: str, filter_value: str, source_id: str) -> tuple[bool, List[str]]:
     """Validate that a filter value exists in the available values.
     
@@ -140,7 +249,8 @@ def validate_filter_value(filter_name: str, filter_value: str, source_id: str) -
         return True, []
 
 
-def sanitize_response_object(response_data: Dict[str, Any]) -> Dict[str, Any]:
+@timing_decorator("sanitize_response_object")
+def sanitize_response_object(obj: Any) -> Dict[str, Any]:
     """
     Sanitize response object by removing unwanted properties and null values.
     
@@ -181,7 +291,7 @@ def sanitize_response_object(response_data: Dict[str, Any]) -> Dict[str, Any]:
             # Return primitive values as-is (including None for filtering at parent level)
             return obj
     
-    return _sanitize_recursive(response_data)
+    return _sanitize_recursive(obj)
 
 
 def handle_column_group_identification(account_summary: dict) -> Dict[str, Any]:
@@ -219,7 +329,8 @@ def handle_column_group_identification(account_summary: dict) -> Dict[str, Any]:
         }
 
 
-def update_column_group_filters(column_group_id: str, updated_filters: List[dict]) -> None:
+@timing_decorator("update_column_group_filters")
+def update_column_group_filters(column_group_id: str, updated_filters: List[Dict[str, Any]]) -> None:
     """Update filters for specific columnGroup in stored account_summary."""
     account_summary = get_stored_account_summary()
     column_groups = account_summary.get("columnGroups", [])
@@ -246,7 +357,8 @@ def _update_stored_account_summary_with_filters(updated_filters: List[FilterGrou
         update_column_group_filters(current_column_group_id, filter_dicts)
 
 
-def create_filter_condition(filter_name: str, filter_value: str, operator: str, filter_type: str, available_filters: List[Dict[str, Any]]) -> FilterCondition:
+@timing_decorator("create_filter_condition")
+def create_filter_condition(filter_name: str, filter_value: str, available_filters: List[Dict[str, Any]], operator: str = "equal", filter_type: str = "lens") -> FilterCondition:
     """Create a FilterCondition with appropriate structure based on sourceType."""
     
     # Find the filter metadata
@@ -325,11 +437,18 @@ class ColumnGroupSelectionInput(BaseModel):
 
 
 @tool("add_filter", args_schema=FilterOperationInput)
+@timing_decorator("add_filter")
 def add_filter(filter_name: str, filter_label: str, filter_value: str, filter_type: str, source_id: str, message: str, operator: str = "equal") -> Dict[str, Any]:
     """Add a new filter condition. Same filter types are grouped together, different filter types get separate entries."""
     
+    tool_start = time.time()
+    print(f"    🔧 [TIMING] Starting add_filter tool for '{filter_label}'...")
+    
     # First, validate the filter value by calling get_filter_values
+    validation_start = time.time()
     is_valid, available_values = validate_filter_value(filter_name, filter_value, source_id)
+    validation_time = time.time() - validation_start
+    print(f"      ✅ [TIMING] Filter validation: {validation_time:.3f}s")
     if not is_valid and available_values:
         return {
             "response_type": "clarification_needed",
@@ -410,7 +529,7 @@ def add_filter(filter_name: str, filter_label: str, filter_value: str, filter_ty
         
         if has_same_filter_type and filter_group.source_type.value == filter_type:
             # Add the new condition to the existing filter group
-            new_condition = create_filter_condition(actual_filter_name, filter_value, operator, filter_type, available_filters)
+            new_condition = create_filter_condition(actual_filter_name, filter_value, available_filters, operator, filter_type)
             new_conditions = list(filter_group.value) + [new_condition]
             
             updated_filters.append(FilterGroup(
@@ -425,7 +544,7 @@ def add_filter(filter_name: str, filter_label: str, filter_value: str, filter_ty
     
     # If no existing group was found for this filter type, create a new one
     if not filter_added:
-        new_condition = create_filter_condition(actual_filter_name, filter_value, operator, filter_type, available_filters)
+        new_condition = create_filter_condition(actual_filter_name, filter_value, available_filters, operator, filter_type)
         new_filter = FilterGroup(
             operator=LogicalOperator.AND,
             value=[new_condition],
@@ -537,7 +656,7 @@ def modify_filter(filter_name: str, filter_label: str, filter_value: str, filter
                 if (condition.columnName.lower().replace(' ', '_') == filter_name.lower() or
                     condition.columnName.lower() == filter_label.lower()):
                     # Update this condition
-                    new_condition = create_filter_condition(actual_filter_name, filter_value, operator, filter_type, available_filters)
+                    new_condition = create_filter_condition(actual_filter_name, filter_value, available_filters, operator, filter_type)
                     new_conditions.append(new_condition)
                     filter_found = True
                 else:
@@ -555,7 +674,7 @@ def modify_filter(filter_name: str, filter_label: str, filter_value: str, filter
     
     if not filter_found:
         # If filter not found, add as new filter
-        new_condition = create_filter_condition(actual_filter_name, filter_value, operator, filter_type, available_filters)
+        new_condition = create_filter_condition(actual_filter_name, filter_value, available_filters, operator, filter_type)
         new_filter = FilterGroup(
             operator=LogicalOperator.AND,
             value=[new_condition],
@@ -665,7 +784,7 @@ def add_or_filter(filter_name: str, filter_label: str, filter_values: List[str],
         if contains_same_filter and filter_group.source_type.value == filter_type:
             # Replace this filter group with OR logic and all values
             new_conditions = [
-                create_filter_condition(actual_filter_name, value, operator, filter_type, available_filters)
+                create_filter_condition(actual_filter_name, value, available_filters, operator, filter_type)
                 for value in filter_values
             ]
             
@@ -682,7 +801,7 @@ def add_or_filter(filter_name: str, filter_label: str, filter_values: List[str],
     # If no existing group was found, create a new OR group
     if not filter_found:
         new_conditions = [
-            create_filter_condition(actual_filter_name, value, operator, filter_type, available_filters)
+            create_filter_condition(actual_filter_name, value, available_filters, operator, filter_type)
             for value in filter_values
         ]
         
@@ -1146,53 +1265,70 @@ def _extract_group_name(column_group: Dict[str, Any]) -> Optional[str]:
 
 
 @tool("get_filter_values")
+@timing_decorator("get_filter_values")
 def get_filter_values(filter_name: str, source_id: str) -> List[str]:
     """Fetch available values for a filter from the API using the sourceId."""
-    # Check cache first
+    # Clean up expired cache entries periodically
+    cleanup_expired_cache()
+    
+    # Check enhanced cache first
     cache_key = f"{filter_name}_{source_id}"
-    if cache_key in filter_values_cache:
-        print(f'Using cached values for {filter_name}: {filter_values_cache[cache_key]}')
-        return filter_values_cache[cache_key]
+    cache_hit, cached_data = get_from_cache(cache_key)
+    if cache_hit:
+        return cached_data
+    
+    # Get delphi session from thread-local storage
+    delphi_session = getattr(thread_local, 'delphi_session', '')
+    
+    url = f"https://controlpanel.ogintegration.us/api/reporting_service/next/dataset/{source_id}/column/{filter_name}/distinct"
+    
+    headers = {
+        "Cookie": f"_delphi_session={delphi_session}",
+        "Content-Type": "application/json"
+    }
     
     try:
-        # Get delphi session from thread-local storage
-        delphi_session = getattr(thread_local, 'delphi_session', '')
+        api_start = time.time()
+        print(f"      🌐 [TIMING] Starting API call for filter '{filter_name}'...")
         
-        url = f"https://controlpanel.ogintegration.us/api/reporting_service/next/dataset/{source_id}/column/{filter_name}/distinct"
-        
-        headers = {
-            "Cookie": f"_delphi_session={delphi_session}",
-            "Content-Type": "application/json"
-        }
-        
-        print(f'Fetching filter values for {filter_name} from API...')
-        with httpx.Client(timeout=30.0) as client:
+        # Use httpx for async-compatible HTTP requests
+        with httpx.Client() as client:
             response = client.get(url, headers=headers)
+        
+        api_time = time.time() - api_start
+        print(f"      📡 [TIMING] API call completed in: {api_time:.3f}s")
+        
+        if response.status_code == 200:
+            parse_start = time.time()
+            data = response.json()
+            values = data.get("data", [])
+            result = [str(value) for value in values if value is not None][:50]  # Limit to 50 values
+            parse_time = time.time() - parse_start
             
-            if response.status_code == 200:
-                data = response.json()
-                values = data.get("data", [])
-                result = [str(value) for value in values if value is not None][:50]  # Limit to 50 values
-                print(f'Successfully fetched {len(result)} values for {filter_name}: {result[:5]}...')
-                
-                # Cache the result
-                filter_values_cache[cache_key] = result
-                
-                # If no values returned but API succeeded, return demo values for testing
-                if not result:
-                    return []
-                
-                return result
+            print(f'      ✅ [TIMING] Successfully fetched {len(result)} values for {filter_name} (parsing: {parse_time:.3f}s)')
+            print(f'      📊 [TIMING] Sample values: {result[:5]}...')
+            
+            # Cache the result with enhanced caching system
+            if result:
+                set_cache(cache_key, result, ttl_seconds=300)  # 5 minute TTL
             else:
-                print(f'API request failed with status {response.status_code} for {filter_name}')
-                # Fallback demo values if API fails
-                return []
+                # Cache empty results with shorter TTL to avoid repeated failed requests
+                set_cache(cache_key, [], ttl_seconds=60)  # 1 minute TTL for empty results
+            
+            return result
+        else:
+            print(f'      ❌ [TIMING] API request failed with status {response.status_code} for {filter_name} (took: {api_time:.3f}s)')
+            # Cache failed requests with very short TTL to avoid immediate retries
+            set_cache(cache_key, [], ttl_seconds=30)  # 30 second TTL for failed requests
+            return []
     except Exception as e:
         print(f'Exception while fetching filter values for {filter_name}: {str(e)}')
-        # Fallback demo values on exception
+        # Cache exceptions with very short TTL
+        set_cache(cache_key, [], ttl_seconds=30)
         return []
 
 
+@timing_decorator("initialize_filter_state")
 def initialize_filter_state(account_summary: Optional[AccountSummary], delphi_session: str, available_filters: List[Dict[str, Any]] = None) -> None:
     """Initialize thread-local filter state from account_summary and store delphi session."""
     filter_groups = []
