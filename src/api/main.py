@@ -8,9 +8,10 @@ from fastapi.responses import JSONResponse
 
 from ..models import FilterRequest, FilterAPIResponse
 from ..agent import FilterAgent
+from ..agent.simplified_agent import SimplifiedFilterAgent
 from ..config import get_settings
 from ..utils import conversation_store
-from ..tools.filter_tools import sanitize_response_object, get_cache_stats
+from ..tools.filter_tools import sanitize_response_object, get_cache_stats, add_filter, modify_filter, remove_filter, remove_all_filters, request_clarification
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -35,18 +36,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize filter agent
+# Initialize filter agents
 try:
     filter_agent = FilterAgent(
         openai_api_key=settings.openai_api_key,
         model=settings.openai_model,
         temperature=settings.openai_temperature
     )
-    logger.info("Filter agent initialized successfully")
+    print("Filter agent initialized successfully")
+    simplified_agent = SimplifiedFilterAgent(
+        openai_api_key=settings.openai_api_key,
+        model=settings.openai_model,
+        temperature=settings.openai_temperature
+    )
+    print("Simplified agent initialized successfully")
+    logger.info("Filter agents initialized successfully")
 except Exception as e:
-    logger.error(f"Failed to initialize filter agent: {e}")
-    # Create a mock agent for demo mode
+    logger.error(f"Failed to initialize filter agents: {e}")
+    # Create mock agents for demo mode
     filter_agent = None
+    simplified_agent = None
 
 
 @app.get("/health")
@@ -81,13 +90,16 @@ async def get_filter_cache_stats():
     return get_cache_stats()
 
 
-@app.post("/api/filters/natural-language", response_model=FilterAPIResponse)
-async def process_filter_request(request: FilterRequest) -> FilterAPIResponse:
+@app.post("/api/filters/natural-language")
+async def process_filter_request(request: FilterRequest):
     """
-    Process a natural language filter request.
+    Process a natural language filter request using simplified flow.
     
-    This endpoint takes a natural language query and converts it to structured filters
-    while preserving existing filters and supporting incremental operations.
+    This endpoint:
+    1. Sends available_filters and columnGroups to the agent in system prompt
+    2. Agent calls get_filter_values to fetch values for filters mentioned by user
+    3. Agent returns execution plan with function names and parameters
+    4. Backend manually executes the functions and returns appropriate response
     """
     # Start total timing
     total_start_time = time.time()
@@ -95,7 +107,7 @@ async def process_filter_request(request: FilterRequest) -> FilterAPIResponse:
     print(f"📝 [TIMING] Query: '{request.query}'")
     
     try:
-        if filter_agent is None:
+        if simplified_agent is None:
             # Demo mode - return mock response
             demo_start = time.time()
             response = _create_demo_response(request)
@@ -105,27 +117,30 @@ async def process_filter_request(request: FilterRequest) -> FilterAPIResponse:
             print(f"⏱️  [TIMING] Total request time: {total_time:.3f}s")
             return response
         
-        # Process the request using the filter agent
+        # Process the request using the simplified agent (planning phase)
         agent_start_time = time.time()
-        response = filter_agent.process_request(request)
+        print(f"🧠 [TIMING] Starting agent planning phase...")
+        agent_result = simplified_agent.process_request(request)
         agent_time = time.time() - agent_start_time
-        print(f"🤖 [TIMING] Filter agent processing: {agent_time:.3f}s")
+        print(f"🤖 [TIMING] Agent planning completed: {agent_time:.3f}s")
+        print(f"📊 [TIMING] Agent result status: {agent_result.get('status', 'unknown')}")
+        print(f"DEBUG [API]: Agent result: {agent_result}")
         
-        # Sanitize the response to remove unwanted properties
-        sanitize_start = time.time()
-        if hasattr(response, 'dict'):
-            response_dict = response.dict()
-            sanitized_dict = sanitize_response_object(response_dict)
-            sanitize_time = time.time() - sanitize_start
-            total_time = time.time() - total_start_time
-            print(f"🧹 [TIMING] Response sanitization: {sanitize_time:.3f}s")
-            print(f"⏱️  [TIMING] Total request time: {total_time:.3f}s")
-            # Create a custom JSONResponse to ensure sanitization is applied
-            return JSONResponse(content=sanitized_dict)
+        # Execute the plan manually (execution phase)
+        execution_start = time.time()
+        print(f"⚙️  [TIMING] Starting plan execution phase...")
+        response = await _execute_agent_plan(agent_result, request)
+        execution_time = time.time() - execution_start
+        print(f"✅ [TIMING] Plan execution completed: {execution_time:.3f}s")
+        print(f"📈 [TIMING] Agent vs Execution ratio: {agent_time:.3f}s / {execution_time:.3f}s = {(agent_time/execution_time if execution_time > 0 else 0):.2f}x")
         
         total_time = time.time() - total_start_time
         print(f"⏱️  [TIMING] Total request time: {total_time:.3f}s")
-        logger.info(f"Processed request for conversation {request.conversation_id}")
+        print(f"📊 [TIMING] Performance breakdown:")
+        print(f"   - Agent Planning: {agent_time:.3f}s ({(agent_time/total_time*100):.1f}%)")
+        print(f"   - Plan Execution: {execution_time:.3f}s ({(execution_time/total_time*100):.1f}%)")
+        print(f"   - Other Overhead: {(total_time-agent_time-execution_time):.3f}s ({((total_time-agent_time-execution_time)/total_time*100):.1f}%)")
+        logger.info(f"Processed simplified request for conversation {request.conversation_id} in {total_time:.3f}s")
         return response
         
     except Exception as e:
@@ -133,14 +148,277 @@ async def process_filter_request(request: FilterRequest) -> FilterAPIResponse:
         print(f"❌ [TIMING] Error occurred after {total_time:.3f}s")
         logger.error(f"Error processing request: {str(e)}")
         from ..models import ErrorResponse
-        return ErrorResponse(
-            message="An error occurred while processing your request.",
-            error_code="API_ERROR",
-            conversation_id=request.conversation_id
-        )
+        return {
+            "status": "error",
+            "message": "An error occurred while processing your request.",
+            "error_code": "API_ERROR",
+            "conversation_id": request.conversation_id
+        }
 
 
-def _create_demo_response(request: FilterRequest) -> FilterAPIResponse:
+async def _execute_agent_plan(agent_result: dict, request: FilterRequest) -> dict:
+    """Execute the agent's plan manually and return appropriate response."""
+    
+    # Check the status of the agent result
+    status = agent_result.get("status")
+    
+    if status == "clarification_needed":
+        # Return clarification request directly
+        return {
+            "status": "clarification_needed",
+            "message": agent_result.get("message", "Clarification needed"),
+            "available_values": agent_result.get("available_values", []),
+            "filter_name": agent_result.get("filter_name", ""),
+            "filter_label": agent_result.get("filter_label", ""),
+            "conversation_id": request.conversation_id
+        }
+    
+    elif status == "error":
+        # Return error directly
+        return {
+            "status": "error",
+            "message": agent_result.get("message", "An error occurred"),
+            "error_code": agent_result.get("error_code", "UNKNOWN_ERROR"),
+            "conversation_id": request.conversation_id
+        }
+    
+    elif status == "success":
+        plan_start = time.time()
+        execution_plan = agent_result.get("execution_plan", [])
+        print(f"\n🚀 [TIMING] Starting plan execution with {len(execution_plan)} operations...")
+        print(f"📋 [TIMING] Execution plan: {[item.get('function_name') for item in execution_plan]}")
+        
+        if not execution_plan:
+            return {
+                "status": "error",
+                "message": "No execution plan provided",
+                "error_code": "NO_EXECUTION_PLAN",
+                "conversation_id": request.conversation_id
+            }
+        
+        try:
+            # Initialize filter state for manual execution
+            from ..tools.filter_tools import initialize_filter_state, get_final_account_summary
+            available_filters_dict = [filter_obj.model_dump() for filter_obj in request.available_filters]
+            initialize_filter_state(request.account_summary, request.delphi_session, available_filters_dict)
+            
+            # Execute each function in the plan
+            for i, plan_item in enumerate(execution_plan, 1):
+                function_name = plan_item.get("function_name")
+                parameters = plan_item.get("parameters", [])
+                func_start = time.time()
+                print(f"\n🔧 [TIMING] Executing step {i}/{len(execution_plan)}: {function_name}")
+                
+                if function_name == "add_filter":
+                    await _execute_add_filter(parameters, request.available_filters)
+                elif function_name == "modify_filter":
+                    await _execute_modify_filter(parameters, request.available_filters)
+                elif function_name == "remove_filter":
+                    await _execute_remove_filter(parameters, request.available_filters)
+                elif function_name == "remove_all_filters":
+                    await _execute_remove_all_filters(parameters)
+                elif function_name == "request_clarification":
+                    func_time = time.time() - func_start
+                    print(f"⏰ [TIMING] Function {function_name} completed: {func_time:.3f}s")
+                    return await _execute_request_clarification(parameters, request.conversation_id)
+                else:
+                    logger.warning(f"Unknown function in execution plan: {function_name}")
+                
+                func_time = time.time() - func_start
+                print(f"⏰ [TIMING] Function {function_name} completed: {func_time:.3f}s")
+            
+            # Get the final account summary after all operations
+            summary_start = time.time()
+            final_account_summary = get_final_account_summary()
+            summary_time = time.time() - summary_start
+            total_plan_time = time.time() - plan_start
+            
+            print(f"📄 [TIMING] Account summary generation: {summary_time:.3f}s")
+            print(f"✅ [TIMING] Total plan execution time: {total_plan_time:.3f}s")
+            
+            return {
+                "status": "success",
+                "message": agent_result.get("message", "Filter operations completed successfully"),
+                "account_summary": final_account_summary,
+                "conversation_id": request.conversation_id
+            }
+            
+        except Exception as e:
+            logger.error(f"Error executing plan: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error executing filter operations: {str(e)}",
+                "error_code": "EXECUTION_ERROR",
+                "conversation_id": request.conversation_id
+            }
+    
+    else:
+        return {
+            "status": "error",
+            "message": "Unknown agent result status",
+            "error_code": "UNKNOWN_STATUS",
+            "conversation_id": request.conversation_id
+        }
+
+
+async def _execute_add_filter(parameters: list, available_filters: list) -> None:
+    """Execute add_filter function with given parameters."""
+    if len(parameters) < 6:
+        raise ValueError("add_filter requires at least 6 parameters: filter_name, filter_label, filter_value, filter_type, source_id, message")
+    
+    filter_name = parameters[0]
+    filter_label = parameters[1]
+    filter_value = parameters[2]
+    filter_type = parameters[3]
+    source_id = parameters[4]
+    message = parameters[5]
+    operator = parameters[6] if len(parameters) > 6 else "equal"
+    
+    print(f"🔍 [TIMING] Adding filter: {filter_name}={filter_value} ({filter_type})")
+    tool_start = time.time()
+    
+    # Call the add_filter tool directly with all parameters
+    result = add_filter(
+        filter_name=filter_name,
+        filter_label=filter_label,
+        filter_value=filter_value,
+        filter_type=filter_type,
+        source_id=source_id,
+        message=message,
+        operator=operator
+    )
+    
+    tool_time = time.time() - tool_start
+    print(f"⚡ [TIMING] add_filter tool execution: {tool_time:.3f}s")
+    
+    if result.get("response_type") != "success":
+        raise ValueError(f"Failed to add filter: {result.get('message', 'Unknown error')}")
+
+
+async def _execute_modify_filter(parameters: list, available_filters: list) -> None:
+    """Execute modify_filter function with given parameters."""
+    if len(parameters) < 6:
+        raise ValueError("modify_filter requires at least 6 parameters: filter_name, filter_label, filter_value, filter_type, source_id, message")
+    
+    filter_name = parameters[0]
+    filter_label = parameters[1]
+    filter_value = parameters[2]
+    filter_type = parameters[3]
+    source_id = parameters[4]
+    message = parameters[5]
+    operator = parameters[6] if len(parameters) > 6 else "equal"
+    
+    print(f"🔄 [TIMING] Modifying filter: {filter_name}={filter_value} ({filter_type})")
+    tool_start = time.time()
+    
+    # Call the modify_filter tool directly with all parameters
+    result = modify_filter(
+        filter_name=filter_name,
+        filter_label=filter_label,
+        filter_value=filter_value,
+        filter_type=filter_type,
+        source_id=source_id,
+        message=message,
+        operator=operator
+    )
+    
+    tool_time = time.time() - tool_start
+    print(f"⚡ [TIMING] modify_filter tool execution: {tool_time:.3f}s")
+    
+    if result.get("response_type") != "success":
+        raise ValueError(f"Failed to modify filter: {result.get('message', 'Unknown error')}")
+
+
+async def _execute_remove_filter(parameters: list, available_filters: list) -> None:
+    """Execute remove_filter function with given parameters."""
+    if len(parameters) < 6:
+        raise ValueError("remove_filter requires at least 6 parameters: filter_name, filter_label, filter_value, filter_type, source_id, message")
+    
+    filter_name = parameters[0]
+    filter_label = parameters[1]
+    filter_value = parameters[2]
+    filter_type = parameters[3]
+    source_id = parameters[4]
+    message = parameters[5]
+    operator = parameters[6] if len(parameters) > 6 else "equal"
+    
+    print(f"🗑️  [TIMING] Removing filter: {filter_name}={filter_value} ({filter_type})")
+    tool_start = time.time()
+    
+    # Call the remove_filter tool directly with all parameters
+    result = remove_filter(
+        filter_name=filter_name,
+        filter_label=filter_label,
+        filter_value=filter_value,
+        filter_type=filter_type,
+        source_id=source_id,
+        message=message,
+        operator=operator
+    )
+    
+    tool_time = time.time() - tool_start
+    print(f"⚡ [TIMING] remove_filter tool execution: {tool_time:.3f}s")
+    
+    if result.get("response_type") != "success":
+        raise ValueError(f"Failed to remove filter: {result.get('message', 'Unknown error')}")
+
+
+async def _execute_remove_all_filters(parameters: list) -> None:
+    """Execute remove_all_filters function with given parameters."""
+    if len(parameters) < 1:
+        raise ValueError("remove_all_filters requires at least 1 parameter: message")
+    
+    message = parameters[0]
+    
+    print(f"🧹 [TIMING] Removing all filters")
+    tool_start = time.time()
+    
+    # Call the remove_all_filters tool directly with message parameter
+    result = remove_all_filters(message)
+    
+    tool_time = time.time() - tool_start
+    print(f"⚡ [TIMING] remove_all_filters tool execution: {tool_time:.3f}s")
+    
+    if result.get("response_type") != "success":
+        raise ValueError(f"Failed to remove all filters: {result.get('message', 'Unknown error')}")
+
+
+async def _execute_request_clarification(parameters: list, conversation_id: str) -> dict:
+    """Execute request_clarification function with given parameters."""
+    if len(parameters) < 4:
+        raise ValueError("request_clarification requires 4 parameters: filter_name, user_input, available_values, message")
+    
+    filter_name = parameters[0]
+    user_input = parameters[1]
+    available_values = parameters[2]
+    message = parameters[3]
+    
+    print(f"❓ [TIMING] Requesting clarification for filter: {filter_name}")
+    tool_start = time.time()
+    
+    # Call the request_clarification tool directly
+    result = request_clarification(
+        filter_name=filter_name,
+        user_input=user_input,
+        available_values=available_values,
+        message=message
+    )
+    
+    tool_time = time.time() - tool_start
+    print(f"⚡ [TIMING] request_clarification tool execution: {tool_time:.3f}s")
+    
+    # Convert tool response to API response format
+    return {
+        "status": "clarification_needed",
+        "message": result.get("message", message),
+        "available_values": available_values,
+        "filter_name": filter_name,
+        "filter_label": filter_name,  # Use filter_name as label for now
+        "conversation_id": conversation_id
+    }
+
+
+def _create_demo_response(request: FilterRequest) -> dict:
     """Create a demo response when OpenAI is not available."""
     from ..models import FilterResponse, AccountSummary, ColumnGroup
     
@@ -218,9 +496,9 @@ def _create_demo_response(request: FilterRequest) -> FilterAPIResponse:
     )
     
     # Sanitize the demo response as well
-    response_dict = response.dict()
+    response_dict = response if isinstance(response, dict) else response.dict()
     sanitized_dict = sanitize_response_object(response_dict)
-    return JSONResponse(content=sanitized_dict)
+    return sanitized_dict
 
 
 if __name__ == "__main__":

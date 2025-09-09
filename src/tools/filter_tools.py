@@ -436,7 +436,6 @@ class ColumnGroupSelectionInput(BaseModel):
     message: str = Field(..., description="Success message to show user")
 
 
-@tool("add_filter", args_schema=FilterOperationInput)
 @timing_decorator("add_filter")
 def add_filter(filter_name: str, filter_label: str, filter_value: str, filter_type: str, source_id: str, message: str, operator: str = "equal") -> Dict[str, Any]:
     """Add a new filter condition. Same filter types are grouped together, different filter types get separate entries."""
@@ -566,7 +565,6 @@ def add_filter(filter_name: str, filter_label: str, filter_value: str, filter_ty
     }
 
 
-@tool("modify_filter", args_schema=FilterOperationInput)
 def modify_filter(filter_name: str, filter_label: str, filter_value: str, filter_type: str, source_id: str, message: str, operator: str = "equal") -> Dict[str, Any]:
     """Modify an existing filter while preserving other filters."""
     
@@ -826,7 +824,6 @@ def add_or_filter(filter_name: str, filter_label: str, filter_values: List[str],
     }
 
 
-@tool("remove_filter", args_schema=FilterOperationInput)
 def remove_filter(filter_name: str, filter_label: str, filter_value: str, filter_type: str, source_id: str, message: str, operator: str = "equal") -> Dict[str, Any]:
     """Remove a specific filter while preserving others."""
     
@@ -1004,7 +1001,6 @@ def remove_multiple_filters(filter_types: List[str], message: str) -> Dict[str, 
     }
 
 
-@tool("remove_all_filters")
 def remove_all_filters(message: str = "Successfully removed all filters.") -> Dict[str, Any]:
     """Remove all filters and reset to empty state."""
     
@@ -1053,7 +1049,6 @@ def handle_casual_conversation(message: str) -> Dict[str, Any]:
     }
 
 
-@tool("request_clarification", args_schema=ClarificationInput)
 def request_clarification(filter_name: str, user_input: str, available_values: List[str], message: str) -> Dict[str, Any]:
     """Request clarification when filter value is ambiguous."""
     
@@ -1410,7 +1405,7 @@ def get_current_filters() -> List[FilterGroup]:
 
 
 # Export all tools for the agent
-FILTER_TOOLS = [add_filter, modify_filter, remove_filter, remove_multiple_filters, remove_all_filters, handle_casual_conversation, request_clarification, get_filter_values, add_or_filter, identify_column_group, select_column_group]
+FILTER_TOOLS = []
 
 # Export storage functions for use by other modules
 __all__ = [
