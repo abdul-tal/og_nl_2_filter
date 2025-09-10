@@ -97,7 +97,7 @@ async def process_filter_request(request: FilterRequest):
     
     This endpoint:
     1. Sends available_filters and columnGroups to the agent in system prompt
-    2. Agent calls get_filter_values to fetch values for filters mentioned by user
+    2. Agent calls get_filter_values to fetch values for right filters mentioned by user. The filters will be one of available_filters. If filters don't exist in available_filters, agent will return clarification needed response.
     3. Agent returns execution plan with function names and parameters
     4. Backend manually executes the functions and returns appropriate response
     """
@@ -236,9 +236,12 @@ async def _execute_agent_plan(agent_result: dict, request: FilterRequest) -> dic
             print(f"📄 [TIMING] Account summary generation: {summary_time:.3f}s")
             print(f"✅ [TIMING] Total plan execution time: {total_plan_time:.3f}s")
             
+            # Generate specific operation message based on execution plan
+            operation_message = _generate_operation_message(execution_plan, agent_result)
+            
             return {
                 "status": "success",
-                "message": agent_result.get("message", "Filter operations completed successfully"),
+                "message": operation_message,
                 "account_summary": final_account_summary,
                 "conversation_id": request.conversation_id
             }
@@ -381,6 +384,59 @@ async def _execute_remove_all_filters(parameters: list) -> None:
     
     if result.get("response_type") != "success":
         raise ValueError(f"Failed to remove all filters: {result.get('message', 'Unknown error')}")
+
+
+def _generate_operation_message(execution_plan: list, agent_result: dict) -> str:
+    """Generate a specific message based on the operations performed in the execution plan."""
+    if not execution_plan:
+        return "No operations performed"
+    
+    messages = []
+    
+    for plan_item in execution_plan:
+        function_name = plan_item.get("function_name")
+        parameters = plan_item.get("parameters", [])
+        
+        if function_name == "add_filter":
+            if len(parameters) >= 3:
+                filter_label = parameters[1]  # filter_label is the second parameter
+                filter_value = parameters[2]  # filter_value is the third parameter
+                messages.append(f"{filter_label} filter '{filter_value}' added")
+            else:
+                messages.append("Filter added")
+                
+        elif function_name == "modify_filter":
+            if len(parameters) >= 3:
+                filter_label = parameters[1]
+                filter_value = parameters[2]
+                messages.append(f"{filter_label} filter modified to '{filter_value}'")
+            else:
+                messages.append("Filter modified")
+                
+        elif function_name == "remove_filter":
+            if len(parameters) >= 3:
+                filter_label = parameters[1]
+                filter_value = parameters[2]
+                messages.append(f"{filter_label} filter '{filter_value}' removed")
+            else:
+                messages.append("Filter removed")
+                
+        elif function_name == "remove_all_filters":
+            messages.append("All filters removed")
+            
+        elif function_name == "request_clarification":
+            if len(parameters) >= 1:
+                filter_name = parameters[0]
+                messages.append(agent_result.get("message", ""))
+            else:
+                messages.append("Clarification requested")
+    
+    if len(messages) == 1:
+        return messages[0]
+    elif len(messages) > 1:
+        return "; ".join(messages)
+    else:
+        return "Filter operations completed successfully"
 
 
 async def _execute_request_clarification(parameters: list, conversation_id: str) -> dict:
