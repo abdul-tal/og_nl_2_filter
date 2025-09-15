@@ -212,6 +212,24 @@ def normalize_filter_condition(condition_data: Dict[str, Any]) -> Dict[str, Any]
     return normalized
 
 
+def _determine_source_type(filter_group_data: Dict[str, Any], conditions: List) -> str:
+    """Determine source_type based on filter structure."""
+    # Check if explicit source_type is provided
+    explicit_source_type = filter_group_data.get("source_type")
+    print(f"DEBUG: _determine_source_type - explicit_source_type: {explicit_source_type}")
+    if explicit_source_type:
+        return explicit_source_type
+    
+    # If no explicit source_type, infer from conditions
+    # If any condition has dimension field, it's a dimensions filter
+    has_dimension = any(
+        hasattr(condition, 'dimension') and condition.dimension 
+        for condition in conditions
+    )
+    print(f"DEBUG: _determine_source_type - has_dimension: {has_dimension}, conditions: {[hasattr(c, 'dimension') for c in conditions]}")
+    return "dimensions" if has_dimension else "lens"
+
+
 def normalize_filter_group(filter_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normalize filter group data to match our FilterGroup model.
@@ -439,7 +457,13 @@ class ColumnGroupSelectionInput(BaseModel):
 @timing_decorator("add_filter")
 def add_filter(filter_name: str, filter_label: str, filter_value: str, filter_type: str, source_id: str, message: str, operator: str = "equal") -> Dict[str, Any]:
     """Add a new filter condition. Same filter types are grouped together, different filter types get separate entries."""
-    
+    print('DEBUG::: filter_name:::', filter_name)
+    print('DEBUG::: filter_label:::', filter_label)
+    print('DEBUG::: filter_value:::', filter_value)
+    print('DEBUG::: filter_type:::', filter_type)
+    print('DEBUG::: source_id:::', source_id)
+    print('DEBUG::: message:::', message)
+    print('DEBUG::: operator:::', operator)
     tool_start = time.time()
     print(f"    🔧 [TIMING] Starting add_filter tool for '{filter_label}'...")
     
@@ -508,7 +532,7 @@ def add_filter(filter_name: str, filter_label: str, filter_value: str, filter_ty
                         existing_filters.append(FilterGroup(
                             operator=LogicalOperator(normalized_filter_group.get("operator", "and")),
                             value=conditions,
-                            source_type=FilterType(normalized_filter_group.get("source_type", "lens"))
+                            source_type=FilterType(_determine_source_type(normalized_filter_group, conditions))
                         ))
                     except Exception as e:
                         logger.warning(f"Skipping invalid filter group: {filter_data} - Error: {e}")
@@ -519,17 +543,24 @@ def add_filter(filter_name: str, filter_label: str, filter_value: str, filter_ty
     filter_added = False
     
     for filter_group in existing_filters:
-        # Check if this group already contains the same filter type
-        has_same_filter_type = any(
-            condition.columnName.lower().replace(' ', '_') == filter_name.lower() or
-            condition.columnName.lower() == filter_label.lower()
+        # Check if this group already contains the same columnName
+        has_same_column = any(
+            condition.columnName == actual_filter_name
             for condition in filter_group.value
         )
         
-        if has_same_filter_type and filter_group.source_type.value == filter_type:
+        print(f"DEBUG: Checking filter group with {len(filter_group.value)} conditions")
+        print(f"DEBUG: Looking for columnName '{actual_filter_name}' in group")
+        print(f"DEBUG: Group columnNames: {[condition.columnName for condition in filter_group.value]}")
+        print(f"DEBUG: has_same_column: {has_same_column}, source_type match: {filter_group.source_type.value == filter_type}")
+        print(f"DEBUG: Existing source_type: '{filter_group.source_type.value}', New filter_type: '{filter_type}'")
+        
+        if has_same_column and filter_group.source_type.value == filter_type:
             # Add the new condition to the existing filter group
             new_condition = create_filter_condition(actual_filter_name, filter_value, available_filters, operator, filter_type)
             new_conditions = list(filter_group.value) + [new_condition]
+            
+            print(f"DEBUG: Adding condition to existing group. New group will have {len(new_conditions)} conditions")
             
             updated_filters.append(FilterGroup(
                 operator=filter_group.operator,
@@ -630,7 +661,7 @@ def modify_filter(filter_name: str, filter_label: str, filter_value: str, filter
                         existing_filters.append(FilterGroup(
                             operator=LogicalOperator(normalized_filter_group.get("operator", "and")),
                             value=conditions,
-                            source_type=FilterType(normalized_filter_group.get("source_type", "lens"))
+                            source_type=FilterType(_determine_source_type(normalized_filter_group, conditions))
                         ))
                     except Exception as e:
                         logger.warning(f"Skipping invalid filter group: {filter_data} - Error: {e}")
@@ -762,7 +793,7 @@ def add_or_filter(filter_name: str, filter_label: str, filter_values: List[str],
                         existing_filters.append(FilterGroup(
                             operator=LogicalOperator(normalized_filter_group.get("operator", "and")),
                             value=conditions,
-                            source_type=FilterType(normalized_filter_group.get("source_type", "lens"))
+                            source_type=FilterType(_determine_source_type(normalized_filter_group, conditions))
                         ))
                     except Exception as e:
                         logger.warning(f"Skipping invalid filter group: {filter_data} - Error: {e}")
@@ -871,7 +902,7 @@ def remove_filter(filter_name: str, filter_label: str, filter_value: str, filter
                         existing_filters.append(FilterGroup(
                             operator=LogicalOperator(normalized_filter_group.get("operator", "and")),
                             value=conditions,
-                            source_type=FilterType(normalized_filter_group.get("source_type", "lens"))
+                            source_type=FilterType(_determine_source_type(normalized_filter_group, conditions))
                         ))
                     except Exception as e:
                         logger.warning(f"Skipping invalid filter group: {filter_data} - Error: {e}")
@@ -953,7 +984,7 @@ def remove_multiple_filters(filter_types: List[str], message: str) -> Dict[str, 
                         existing_filters.append(FilterGroup(
                             operator=LogicalOperator(normalized_filter_group.get("operator", "and")),
                             value=conditions,
-                            source_type=FilterType(normalized_filter_group.get("source_type", "lens"))
+                            source_type=FilterType(_determine_source_type(normalized_filter_group, conditions))
                         ))
                     except Exception as e:
                         logger.warning(f"Skipping invalid filter group: {filter_data} - Error: {e}")
@@ -1356,7 +1387,7 @@ def initialize_filter_state(account_summary: Optional[AccountSummary], delphi_se
                         filter_groups.append(FilterGroup(
                             operator=LogicalOperator(normalized_filter_group.get("operator", "and")),
                             value=conditions,
-                            source_type=FilterType(normalized_filter_group.get("source_type", "lens"))
+                            source_type=FilterType(_determine_source_type(normalized_filter_group, conditions))
                         ))
                     except Exception as e:
                         logger.warning(f"Skipping invalid filter group during initialization: {filter_data} - Error: {e}")
@@ -1382,7 +1413,7 @@ def initialize_filter_state(account_summary: Optional[AccountSummary], delphi_se
                         filter_groups.append(FilterGroup(
                             operator=LogicalOperator(normalized_filter_group.get("operator", "and")),
                             value=conditions,
-                            source_type=FilterType(normalized_filter_group.get("source_type", "lens"))
+                            source_type=FilterType(_determine_source_type(normalized_filter_group, conditions))
                         ))
                     except Exception as e:
                         logger.warning(f"Skipping invalid filter group during initialization: {filter_data} - Error: {e}")
