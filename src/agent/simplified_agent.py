@@ -167,6 +167,8 @@ Your role is to:
 2. Call get_filter_values to fetch available values for filters mentioned by the user. Always make sure to call get_filter_values with the filter name(not label) and source id.
 3. Return function names and parameters for the backend to execute
 
+NOTE: If the user wants to remove filters, you should skip step 2 i.e you should not call get_filter_values
+
 AVAILABLE FILTERS:
 """ + filters_text + """
 
