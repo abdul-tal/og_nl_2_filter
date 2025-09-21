@@ -2,6 +2,7 @@
 
 import logging
 import time
+from urllib.parse import unquote
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -90,6 +91,38 @@ async def get_filter_cache_stats():
     return get_cache_stats()
 
 
+def decode_available_filters_source_ids(available_filters):
+    """
+    URL decode the sourceId field in available filters.
+    
+    Args:
+        available_filters: List of filter objects with sourceId fields
+        
+    Returns:
+        List of filter objects with decoded sourceId fields
+    """
+    if not available_filters:
+        return available_filters
+    
+    decoded_filters = []
+    for filter_obj in available_filters:
+        # Create a copy to avoid modifying the original
+        if hasattr(filter_obj, 'model_dump'):
+            # Pydantic model
+            filter_dict = filter_obj.model_dump()
+        else:
+            # Regular dict
+            filter_dict = dict(filter_obj)
+        
+        # URL decode the sourceId if it exists
+        if 'sourceId' in filter_dict and filter_dict['sourceId']:
+            filter_dict['sourceId'] = unquote(filter_dict['sourceId'])
+        
+        decoded_filters.append(filter_dict)
+    
+    return decoded_filters
+
+
 @app.post("/api/filters/natural-language")
 async def process_filter_request(request: FilterRequest):
     """
@@ -105,12 +138,22 @@ async def process_filter_request(request: FilterRequest):
     total_start_time = time.time()
     print(f"\n🚀 [TIMING] Starting natural language filter request processing...")
     print(f"📝 [TIMING] Query: '{request.query}'")
+    print(f"📝 [TIMING] Available filters: '{request.available_filters}'")
     
     try:
+        # URL decode the sourceId fields in available_filters
+        decoded_available_filters = decode_available_filters_source_ids(request.available_filters)
+        print(f"🔓 [TIMING] URL decoded {len(decoded_available_filters)} available filters")
+        
+        # Create a new request object with decoded filters
+        from copy import deepcopy
+        decoded_request = deepcopy(request)
+        decoded_request.available_filters = decoded_available_filters
+        
         if simplified_agent is None:
             # Demo mode - return mock response
             demo_start = time.time()
-            response = _create_demo_response(request)
+            response = _create_demo_response(decoded_request)
             demo_time = time.time() - demo_start
             total_time = time.time() - total_start_time
             print(f"🎭 [TIMING] Demo mode processing: {demo_time:.3f}s")
@@ -120,7 +163,7 @@ async def process_filter_request(request: FilterRequest):
         # Process the request using the simplified agent (planning phase)
         agent_start_time = time.time()
         print(f"🧠 [TIMING] Starting agent planning phase...")
-        agent_result = simplified_agent.process_request(request)
+        agent_result = simplified_agent.process_request(decoded_request)
         agent_time = time.time() - agent_start_time
         print(f"🤖 [TIMING] Agent planning completed: {agent_time:.3f}s")
         print(f"📊 [TIMING] Agent result status: {agent_result.get('status', 'unknown')}")
@@ -129,7 +172,7 @@ async def process_filter_request(request: FilterRequest):
         # Execute the plan manually (execution phase)
         execution_start = time.time()
         print(f"⚙️  [TIMING] Starting plan execution phase...")
-        response = await _execute_agent_plan(agent_result, request)
+        response = await _execute_agent_plan(agent_result, decoded_request)
         execution_time = time.time() - execution_start
         print(f"✅ [TIMING] Plan execution completed: {execution_time:.3f}s")
         print(f"📈 [TIMING] Agent vs Execution ratio: {agent_time:.3f}s / {execution_time:.3f}s = {(agent_time/execution_time if execution_time > 0 else 0):.2f}x")
@@ -199,7 +242,13 @@ async def _execute_agent_plan(agent_result: dict, request: FilterRequest) -> dic
         try:
             # Initialize filter state for manual execution
             from ..tools.filter_tools import initialize_filter_state, get_final_account_summary
-            available_filters_dict = [filter_obj.model_dump() for filter_obj in request.available_filters]
+            # Handle both Pydantic models and dictionaries
+            available_filters_dict = []
+            for filter_obj in request.available_filters:
+                if hasattr(filter_obj, 'model_dump'):
+                    available_filters_dict.append(filter_obj.model_dump())
+                else:
+                    available_filters_dict.append(dict(filter_obj))
             initialize_filter_state(request.account_summary, request.delphi_session, available_filters_dict)
             
             # Execute each function in the plan

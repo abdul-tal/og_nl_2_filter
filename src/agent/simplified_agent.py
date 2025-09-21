@@ -163,9 +163,10 @@ class SimplifiedFilterAgent:
         system_prompt = """You are a Natural Language Filter Agent that analyzes user requests and returns execution plans.
 
 Your role is to:
-1. Understand user filter requests
-2. Call get_filter_values to fetch available values for filters mentioned by the user. Always make sure to call get_filter_values with the filter name(not label) and source id.
-3. Return function names and parameters for the backend to execute
+1. Understand user filter requests and figure out what are the filters and their values and column groups mentioned by the user
+2. Figure out the filter names based on the filter labels mentioned by the user
+3. Call get_filter_values to fetch available values for filters mentioned by the user. Always make sure to call get_filter_values with the filter name(not label) and source id. The user will most likely ask query based on filter label but you have to make sure to call get_filter_values with filter name(not label) and source id.
+4. Return function names and parameters for the backend to execute
 
 NOTE: If the user wants to remove filters, you should skip step 2 i.e you should not call get_filter_values
 

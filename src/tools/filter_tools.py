@@ -9,6 +9,7 @@ import functools
 from typing import List, Dict, Any, Optional
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
+from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
 
@@ -457,6 +458,7 @@ class ColumnGroupSelectionInput(BaseModel):
 @timing_decorator("add_filter")
 def add_filter(filter_name: str, filter_label: str, filter_value: str, filter_type: str, source_id: str, message: str, operator: str = "equal") -> Dict[str, Any]:
     """Add a new filter condition. Same filter types are grouped together, different filter types get separate entries."""
+    source_id = unquote(source_id);
     print('DEBUG::: filter_name:::', filter_name)
     print('DEBUG::: filter_label:::', filter_label)
     print('DEBUG::: filter_value:::', filter_value)

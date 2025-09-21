@@ -1,6 +1,8 @@
 """Simplified tools for the planning-only filter agent."""
 
 import json
+from shlex import quote
+from urllib.parse import quote as url_quote
 import httpx
 import threading
 import logging
@@ -55,7 +57,10 @@ def get_filter_values_tool(filter_name: str, source_id: str) -> Dict[str, Any]:
     # Get delphi session from thread-local storage
     delphi_session = getattr(thread_local, 'delphi_session', '')
     print('delphi_session:::', delphi_session)
-    url = f"https://controlpanel.ogintegration.us/api/reporting_service/next/dataset/{source_id}/column/{filter_name}/distinct"
+    url_encoded_source_id = url_quote(source_id, safe='');
+    print('url_encoded_source_id:::', url_encoded_source_id)
+    url = f"https://controlpanel.ogintegration.us/api/reporting_service/next/dataset/{url_encoded_source_id}/column/{filter_name}/distinct"
+    print('url:::', url)
     
     headers = {
         "Cookie": f"_delphi_session={delphi_session}",
